@@ -1,0 +1,37 @@
+{
+  "appFileId": "BQACAgQAAxkBAAPGapmLmSeJfaZ4_fiT7hBxWsVMaEgAAkIeAAL0atBQQsJSBYHpjaM9BA",
+  "appFileName": "YousFarm DZ.apk",
+  "appVersion": "5.0.3",
+  "appSizeMb": 4.9,
+  "uploadedAt": null,
+  "uploadedBy": null,
+  "welcomeFileId": "AgACAgQAAxkBAAIBVWqZ03RysfDvmtPaupDfwEy9xJ4HAALwEGsb9GrQUMmwPvSqAAHW3gEAAwIAA3kAAz0E",
+  "welcomeFileIds": [
+    "AgACAgQAAxkBAAIBVWqZ03RysfDvmtPaupDfwEy9xJ4HAALwEGsb9GrQUMmwPvSqAAHW3gEAAwIAA3kAAz0E",
+    "AgACAgQAAxkBAAIBV2qZ04ken4XDDgqXmSqdpfoW2bFrAALxEGsb9GrQUFKVR8okPgJXAQADAgADeQADPQQ",
+    "AgACAgQAAxkBAAIBWWqZ05yrrCwvDlS6lk-atUjZ0QtKAALyEGsb9GrQUBizwFTXY6gxAQADAgADeQADPQQ",
+    "AgACAgQAAxkBAAIBjmqZ3TZ8bXciuQYy3E7ZU7Wy_EReAAL-EGsb9GrQUF7--1qcF1WsAQADAgADeQADPQQ"
+  ],
+  "downloadCount": 7,
+  "downloadUsers": [
+    "8933263388",
+    "6190616202"
+  ],
+  "discountUsed": 1,
+  "referrals": {
+    "6190616202": {
+      "code": "REF_6190616202",
+      "count": 0,
+      "referredBy": null,
+      "rewarded": false,
+      "referredUsers": []
+    },
+    "8933263388": {
+      "code": "REF_8933263388",
+      "count": 0,
+      "referredBy": null,
+      "rewarded": false,
+      "referredUsers": []
+    }
+  }
+}
