@@ -39,7 +39,10 @@ const LICENSE_SECRET = 'YF2024SEC';
 const TYPE_CODES = ['TR4','TR3','TR7','TR0','M','Y','F'];
 function normalizeDeviceId(input) {
   if (!input) return null;
-  let s = String(input).trim().toUpperCase().replace(/[^A-F0-9]/g, '');
+  let s = String(input).trim().toUpperCase();
+  // أزل بادئة YF- إن وجدت (ليست جزءاً من الـ hex)
+  s = s.replace(/^YF-?/, '');
+  s = s.replace(/[^A-F0-9]/g, '');
   if (s.length < 4) return null;
   if (s.length > 32) s = s.slice(0, 32);
   return s.toLowerCase();
