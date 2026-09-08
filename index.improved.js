@@ -40,12 +40,8 @@ const TYPE_CODES = ['TR4','TR3','TR7','TR0','M','Y','F'];
 function normalizeDeviceId(input) {
   if (!input) return null;
   let s = String(input).trim().toUpperCase().replace(/[^A-F0-9]/g, '');
-  // المستخدم قد يرسل YF-XXXX-... أو XXXX-XXXX-... — نزيل كل شيء غير سداسي
-  if (s.length < 16) return null;
-  // التطبيق يستخدم 32 حرف hex، لكن المعروض 4 مجموعات (16 حرف) قد يكفي للاختبار
-  // نأخذ أول 32 حرف، وإن كان أقل نستخدم كما هو (سيُرفض إن لم يطابق)
+  if (s.length < 4) return null;
   if (s.length > 32) s = s.slice(0, 32);
-  // التطبيق يحفظ deviceId كـ 32 حرف lowercase hex — نعيده lowercase
   return s.toLowerCase();
 }
 function generateLicenseKey(deviceIdInput, typeCode = 'F') {
