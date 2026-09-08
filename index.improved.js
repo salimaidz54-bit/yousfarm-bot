@@ -495,7 +495,8 @@ bot.command('genkey', async (ctx) => {
   if (!TYPE_CODES.includes(type)) return ctx.reply(`نوع غير صالح. الأنواع: ${TYPE_CODES.join(', ')}`);
   try {
     const key = generateLicenseKey(deviceId, type);
-    await ctx.replyWithMarkdown(`🔑 *المفتاح (${type === 'Y' ? 'سنة' : type === 'F' ? 'مدى الحياة' : type}):*\n\`${key}\`\nللجهاز: \`${escapeMarkdown(deviceId)}\``, { parse_mode: 'Markdown' });
+    // داخل ` ` لا نهرب المحتوى
+    await ctx.replyWithMarkdown(`🔑 *المفتاح (${type === 'Y' ? 'سنة' : type === 'F' ? 'مدى الحياة' : type}):*\n\`${key}\`\nللجهاز: \`${deviceId}\``, { parse_mode: 'Markdown' });
   } catch (e) {
     await ctx.reply(`⚠️ فشل: ${e.message}`);
   }
@@ -655,7 +656,8 @@ const DEVICE_ID_REGEX = /^YF-[A-Z0-9]{4,}-[A-Z0-9-]{4,}$/i; // يتماشى مع
 
 bot.on('text', async (ctx, next) => {
   if (ctx.session.state !== 'awaiting_device_id') return next();
-  const trimmed = ctx.message.text.trim().replace(/\s+/g, '');
+  // نزيل الشرطات المائلة التي قد تأتي من نسخ Markdown (YF\-XXXX)
+  const trimmed = ctx.message.text.trim().replace(/\\/g, '').replace(/\s+/g, '');
   if (!DEVICE_ID_REGEX.test(trimmed)) {
     await ctx.replyWithMarkdown(invalidDeviceIdText(), cancelKeyboard());
     return;
@@ -697,7 +699,7 @@ bot.on('photo', async (ctx, next) => {
   const adminCaption =
     `🔔 *إثبات دفع جديد*\n\n` +
     `👤 الزبون: ${customerLabel(ctx)}\n` +
-    `🆔 معرّف الجهاز: \`${escapeMarkdown(ctx.session.deviceId)}\`\n` +
+    `🆔 معرّف الجهاز: \`${ctx.session.deviceId}\`\n` +
     `💰 السعر المتوقع: ${escapeMarkdown(CONFIG.PRICES.yearly)} / ${escapeMarkdown(CONFIG.PRICES.lifetime)}\n\n` +
     `اختر إجراء:`;
 
