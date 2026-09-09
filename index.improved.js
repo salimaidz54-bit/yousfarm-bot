@@ -8,6 +8,7 @@ require('dotenv').config();
 const { Telegraf, Markup, session } = require('telegraf');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 // ==================== إعدادات آمنة (من ملف .env) ====================
 // أنشئ ملف .env بجانب index.js وضع فيه:
@@ -32,6 +33,30 @@ const CONFIG = {
     enabled: (process.env.DISCOUNT_ENABLED || 'true') === 'true',
   },
 };
+
+// ==================== توليد مفاتيح الترخيص (مطابق تماماً لكود التطبيق JS) ====================
+// من index.html:
+//   buildDeviceId -> 'YF-' + HASH[0:4] + '-' + HASH[4:8]  (مثال: YF-E473-1572)
+//   generateLicenseKeyWith: combined = cleanDeviceId + 'YF2024SEC' + typeCode
+//   key = YF24-<code>-<hash[0:4]>-<hash[4:8]>-<hash[8:12]>
+// مهم: cleanDeviceId تُستخدم كما تظهر (مع YF- والشرطات) وبدون فواصل إضافية
+const LICENSE_SECRET_JS = 'YF2024SEC';
+const TYPE_CODES_JS = ['TR4', 'TR3', 'TR7', 'TR0', 'M', 'Y', 'F'];
+function normalizeDeviceIdJS(input) {
+  if (!input) return null;
+  // نزيل شرطات Markdown المائلة ثم مسافات
+  let s = String(input).trim().replace(/\\/g, '').replace(/\s+/g, '');
+  if (!/^YF-[A-Z0-9]{4,}-[A-Z0-9-]{4,}$/i.test(s)) return null;
+  return s.toUpperCase();
+}
+function generateLicenseKeyJS(deviceIdInput, typeCode = 'F') {
+  if (!TYPE_CODES_JS.includes(typeCode)) throw new Error('Invalid typeCode ' + typeCode);
+  const clean = normalizeDeviceIdJS(deviceIdInput);
+  if (!clean) throw new Error('Invalid deviceId format (expected YF-XXXX-XXXX)');
+  const combined = clean + LICENSE_SECRET_JS + typeCode;
+  const hash = crypto.createHash('sha256').update(combined, 'utf8').digest('hex').toUpperCase();
+  return `YF24-${typeCode}-${hash.slice(0, 4)}-${hash.slice(4, 8)}-${hash.slice(8, 12)}`;
+}
 
 // تحقق إقلاعي
 if (!CONFIG.BOT_TOKEN) {
@@ -520,6 +545,20 @@ bot.command('send', async (ctx) => {
   const ok = await sendToUser(targetId, msg);
   await ctx.reply(ok ? `✅ تم الإرسال إلى ${targetId}` : `❌ فشل الإرسال إلى ${targetId} — ربما حظر البوت أو لم يبدأه. راجع السجلات.`);
 });
+// توليد مفتاح يدوياً لأي معرف (بنفس خوارزمية التطبيق)
+bot.command('genkey', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ للأدمن فقط.');
+  const args = ctx.message.text.split(/\s+/);
+  const rawId = args[1];
+  const type = (args[2] || 'F').toUpperCase();
+  if (!rawId) return ctx.reply('استخدم: /genkey <معرف الجهاز> [Y|F]\nمثال:\n/genkey YF-E473-1572 F\nY = سنة، F = مدى الحياة');
+  try {
+    const key = generateLicenseKeyJS(rawId, type);
+    await ctx.replyWithMarkdown(`🔑 *المفتاح (${type === 'Y' ? 'سنة' : 'مدى الحياة'}):*\n\`${key}\`\nللجهاز: \`${rawId.toUpperCase()}\``);
+  } catch (e) {
+    await ctx.reply(`⚠️ فشل: ${e.message}`);
+  }
+});
 // ===== إدارة صور الترحيب (احترافية) =====
 bot.command('setwelcome', async (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply('⛔ للأدمن فقط.');
@@ -690,7 +729,8 @@ const DEVICE_ID_REGEX = /^YF-[A-Z0-9]{4,}-[A-Z0-9-]{4,}$/i; // يتماشى مع
 
 bot.on('text', async (ctx, next) => {
   if (ctx.session.state !== 'awaiting_device_id') return next();
-  const trimmed = ctx.message.text.trim().replace(/\s+/g, '');
+  // نزيل شرطات Markdown المائلة (YF\-XXXX) ثم المسافات
+  const trimmed = ctx.message.text.trim().replace(/\\/g, '').replace(/\s+/g, '');
   if (!DEVICE_ID_REGEX.test(trimmed)) {
     await ctx.replyWithMarkdown(invalidDeviceIdText(), cancelKeyboard());
     return;
@@ -731,7 +771,7 @@ async function forwardProofToAdmin(ctx, fileId, isDocument) {
     `اختر إجراء:`;
 
   const adminKeyboard = Markup.inlineKeyboard([
-    [Markup.button.callback('✅ تأكيد وإرسال المفتاح', `approve_${ctx.from.id}_${deviceId}`)],
+    [Markup.button.callback('✅ سنة (Y) — توليد تلقائي', `approve_${ctx.from.id}_${ctx.session.deviceId}_Y`), Markup.button.callback('♾️ مدى الحياة (F)', `approve_${ctx.from.id}_${ctx.session.deviceId}_F`)],
     [Markup.button.callback('❌ رفض', `reject_${ctx.from.id}`)],
   ]);
 
@@ -790,9 +830,11 @@ bot.on('document', async (ctx) => {
 });
 
 // معالجة أزرار الأدمن للموافقة/الرفض
-bot.action(/approve_(.+)_YF-.+/, async (ctx) => {
+bot.action(/^approve_(\d+)_(YF-[A-Z0-9-]+)_([A-Za-z])$/, async (ctx) => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('⛔ للأدمن فقط');
   const userId = ctx.match[1];
+  const deviceId = ctx.match[2];
+  const typeCode = ctx.match[3].toUpperCase();
   await ctx.answerCbQuery('تم التأكيد');
   // عدّاد الخصم لأول 50
   let discountNote = '';
@@ -835,8 +877,23 @@ bot.action(/approve_(.+)_YF-.+/, async (ctx) => {
       }
     }
   } catch (e) { console.error('referral increment error', e.message); }
-  await ctx.editMessageCaption(`✅ تمت الموافقة — تواصل مع المستخدم ${userId} وأرسل له المفتاح.${discountNote}${referralNote}\nللإرسال عبر البوت: \`/send ${userId} المفتاح\``, { parse_mode: 'Markdown' });
-  let userMsg = '✅ تم تأكيد الدفع! سيصلك مفتاح الترخيص خلال دقائق من الأدمن. شكراً لثقتك 🙏';
+  // توليد المفتاح تلقائياً بنفس خوارزمية التطبيق (Y=سنة، F=مدى الحياة)
+  let generatedKey = null;
+  try {
+    generatedKey = generateLicenseKeyJS(deviceId, typeCode);
+    console.log(`[KEYGEN] ${typeCode} for ${deviceId} => ${generatedKey}`);
+  } catch (e) {
+    console.error('key generation failed:', e.message);
+  }
+  const typeName = typeCode === 'Y' ? 'سنة' : typeCode === 'F' ? 'مدى الحياة' : typeCode;
+  const keyLine = generatedKey ? `\n🔑 المفتاح (${typeName}): \`${generatedKey}\`` : `\n⚠️ فشل التوليد التلقائي — أرسل المفتاح يدوياً: \`/send ${userId} المفتاح\``;
+  await ctx.editMessageCaption(`✅ تمت الموافقة (${typeName}) — المستخدم ${userId}.${discountNote}${referralNote}${keyLine}`, { parse_mode: 'Markdown' });
+  let userMsg;
+  if (generatedKey) {
+    userMsg = `✅ تم تأكيد الدفع! 🎉\n\n🔑 *مفتاحك الخاص (${typeName}):*\n\`${generatedKey}\`\n\nانسخه والصقه في التطبيق ← شاشة التفعيل ← *تفعيل*.`;
+  } else {
+    userMsg = '✅ تم تأكيد الدفع! سيصلك مفتاح الترخيص خلال دقائق من الأدمن. شكراً لثقتك 🙏';
+  }
   if (discountNote) userMsg += `\n\n🎉 مبروك! استفدت من خصم ${CONFIG.DISCOUNT.amount} دج لأول ${CONFIG.DISCOUNT.limit} مشترك!`;
   const okUser = await sendToUser(userId, userMsg);
   if (!okUser) await ctx.reply(`⚠️ تعذر إبلاغ الزبون ${userId} (ربما حظر البوت). أرسل له المفتاح يدوياً.`);
