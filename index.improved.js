@@ -774,11 +774,19 @@ bot.on('photo', async (ctx, next) => {
   await forwardProofToAdmin(ctx, fileId, false);
 });
 
-// رفض الصور في حالات أخرى
+// رفض الصور في حالات أخرى + تشخيص
 bot.on('photo', async (ctx) => {
+  console.log(`[DIAG] photo from ${ctx.from.id}, state=${ctx.session && ctx.session.state}, hasDevice=${!!(ctx.session && ctx.session.deviceId)}`);
   if (ctx.session.state === 'awaiting_device_id') {
     await ctx.reply('⚠️ أرسل معرّف الجهاز كـ *نص* أولاً، ثم الصورة.', { parse_mode: 'Markdown', ...cancelKeyboard() });
+  } else if (ctx.session.state !== 'awaiting_proof') {
+    await ctx.reply('⚠️ لم أفهم هذه الصورة. اضغط /start ثم 🛒 اشترك الآن واتبع الخطوات.', backKeyboard());
   }
+});
+
+// تشخيص: أي مستند لم تعالجه المعالجات السابقة
+bot.on('document', async (ctx) => {
+  console.log(`[DIAG] unhandled document from ${ctx.from.id}, state=${ctx.session && ctx.session.state}, mime=${ctx.message.document && ctx.message.document.mime_type}`);
 });
 
 // معالجة أزرار الأدمن للموافقة/الرفض
@@ -869,6 +877,7 @@ bot.launch()
     } else {
       console.error('❌ ADMIN_CHAT_ID فارغ! الإشعارات لن تصل. أضفه في .env أو متغيرات Render.');
     }
+    console.log('🏷️ BUILD: fix-proof-diag-1 (photo+document proof + diagnostics)');
   })
   .catch((e) => {
     console.error('❌ فشل تشغيل البوت:', e.message);
