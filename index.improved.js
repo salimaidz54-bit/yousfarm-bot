@@ -552,8 +552,20 @@ bot.command('clearwelcome', async (ctx) => {
   await ctx.reply('🗑️ تم حذف صور الترحيب. سيعود الترحيب نصاً فقط.');
 });
 
-// استقبال ملف APK من الأدمن
+// استقبال إثبات الدفع كمستند (الزبون أرسل الصورة كملف بدل صورة)
 bot.on('document', async (ctx, next) => {
+  if (ctx.session && ctx.session.state === 'awaiting_proof' && ctx.session.deviceId) {
+    const doc = ctx.message.document;
+    const mime = (doc.mime_type || '').toLowerCase();
+    // نقبل الصور و PDF فقط كإثبات
+    if (mime.startsWith('image/') || mime === 'application/pdf' || !mime) {
+      console.log(`[FLOW] Proof document received from ${ctx.from.id}, device=${ctx.session.deviceId}, mime=${mime}`);
+      await forwardProofToAdmin(ctx, doc.file_id, true);
+      return;
+    }
+    await ctx.reply('⚠️ أرسل إثبات الدفع كـ *صورة* أو ملف PDF فقط.', { parse_mode: 'Markdown', ...cancelKeyboard() });
+    return;
+  }
   if (!isAdmin(ctx) || ctx.session.state !== 'awaiting_app_upload') return next();
 
   const doc = ctx.message.document;
@@ -703,7 +715,52 @@ bot.on('photo', async (ctx, next) => {
   await ctx.reply(`✅ تم استلام صورة ${ctx.session.pendingWelcomeIds.length}/10. أرسل المزيد أو اكتب /done للحفظ.`);
 });
 
-// ==================== استقبال إثبات الدفع ====================
+// ==================== إثبات الدفع (مشترك: صورة أو مستند) ====================
+async function forwardProofToAdmin(ctx, fileId, isDocument) {
+  const deviceId = ctx.session.deviceId;
+  await ctx.replyWithMarkdown(proofReceivedText(), mainMenuKeyboard());
+
+  // إشعار للأدمن مع أزرار سريعة
+  // ملاحظة: داخل ` ` لا نهرب المحتوى حتى لا تظهر شرطات مائلة
+  const adminCaption =
+    `🔔 *إثبات دفع جديد*\n\n` +
+    `👤 الزبون: ${customerLabel(ctx)}\n` +
+    `🆔 معرّف الجهاز: \`${deviceId}\`\n` +
+    `💰 السعر المتوقع: ${escapeMarkdown(CONFIG.PRICES.yearly)} / ${escapeMarkdown(CONFIG.PRICES.lifetime)}\n\n` +
+    `للرد على الزبون: \`/send ${ctx.from.id} نص الرسالة\`\n\n` +
+    `اختر إجراء:`;
+
+  const adminKeyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('✅ تأكيد وإرسال المفتاح', `approve_${ctx.from.id}_${deviceId}`)],
+    [Markup.button.callback('❌ رفض', `reject_${ctx.from.id}`)],
+  ]);
+
+  const sendFn = isDocument
+    ? (cap) => bot.telegram.sendDocument(CONFIG.ADMIN_CHAT_ID, fileId, { caption: cap, parse_mode: 'Markdown', ...adminKeyboard })
+    : (cap) => bot.telegram.sendPhoto(CONFIG.ADMIN_CHAT_ID, fileId, { caption: cap, parse_mode: 'Markdown', ...adminKeyboard });
+  try {
+    await sendFn(adminCaption);
+  } catch (e) {
+    console.error('فشل إرسال إثبات للأدمن:', e.message);
+    // fallback: نص فقط بدون تنسيق
+    try {
+      const plain = adminCaption.replace(/[*_`]/g, '');
+      if (isDocument) {
+        await bot.telegram.sendDocument(CONFIG.ADMIN_CHAT_ID, fileId, { caption: plain, ...adminKeyboard });
+      } else {
+        await bot.telegram.sendPhoto(CONFIG.ADMIN_CHAT_ID, fileId, { caption: plain, ...adminKeyboard });
+      }
+    } catch (e2) {
+      console.error('فشل fallback الإثبات:', e2.message);
+      await notifyAdmin(adminCaption, adminKeyboard);
+    }
+  }
+
+  ctx.session.state = 'menu';
+  ctx.session.deviceId = null;
+}
+
+// ==================== استقبال إثبات الدفع (صورة) ====================
 bot.on('photo', async (ctx, next) => {
   if (ctx.session.state !== 'awaiting_proof') return next();
   if (!ctx.session.deviceId) {
@@ -713,38 +770,8 @@ bot.on('photo', async (ctx, next) => {
   }
   const photos = ctx.message.photo;
   const fileId = photos[photos.length - 1].file_id;
-
-  await ctx.replyWithMarkdown(proofReceivedText(), mainMenuKeyboard());
-
-  // إشعار للأدمن مع أزرار سريعة
-  // ملاحظة: داخل ` ` لا نهرب المحتوى حتى لا تظهر شرطات مائلة
-  const adminCaption =
-    `🔔 *إثبات دفع جديد*\n\n` +
-    `👤 الزبون: ${customerLabel(ctx)}\n` +
-    `🆔 معرّف الجهاز: \`${ctx.session.deviceId}\`\n` +
-    `💰 السعر المتوقع: ${escapeMarkdown(CONFIG.PRICES.yearly)} / ${escapeMarkdown(CONFIG.PRICES.lifetime)}\n\n` +
-    `للرد على الزبون: \`/send ${ctx.from.id} نص الرسالة\`\n\n` +
-    `اختر إجراء:`;
-
-  const adminKeyboard = Markup.inlineKeyboard([
-    [Markup.button.callback('✅ تأكيد وإرسال المفتاح', `approve_${ctx.from.id}_${ctx.session.deviceId}`)],
-    [Markup.button.callback('❌ رفض', `reject_${ctx.from.id}`)],
-  ]);
-
-  try {
-    await bot.telegram.sendPhoto(CONFIG.ADMIN_CHAT_ID, fileId, {
-      caption: adminCaption,
-      parse_mode: 'Markdown',
-      ...adminKeyboard,
-    });
-  } catch (e) {
-    console.error('فشل إرسال إثبات للأدمن:', e.message);
-    // fallback نص فقط
-    await notifyAdmin(adminCaption, adminKeyboard);
-  }
-
-  ctx.session.state = 'menu';
-  ctx.session.deviceId = null;
+  console.log(`[FLOW] Proof photo received from ${ctx.from.id}, device=${ctx.session.deviceId}`);
+  await forwardProofToAdmin(ctx, fileId, false);
 });
 
 // رفض الصور في حالات أخرى
