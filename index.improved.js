@@ -148,12 +148,51 @@ function findReferrerByCode(code) {
   return referrerId;
 }
 
+function customerLabelPlain(ctx) {
+  const u = ctx.from || {};
+  const uname = u.username ? '@' + u.username : '(بدون معرف)';
+  const name = [u.first_name, u.last_name].filter(Boolean).join(' ') || 'مجهول';
+  return `${name} — ${uname} — ID: ${u.id}`;
+}
+
 async function notifyAdmin(text, extra = {}) {
-  if (!CONFIG.ADMIN_CHAT_ID) return;
+  if (!CONFIG.ADMIN_CHAT_ID) {
+    console.error('notifyAdmin: ADMIN_CHAT_ID غير مضبوط!');
+    return false;
+  }
   try {
     await bot.telegram.sendMessage(CONFIG.ADMIN_CHAT_ID, text, { parse_mode: 'Markdown', ...extra });
+    return true;
   } catch (e) {
-    console.error('فشل إرسال إشعار للأدمن:', e.message);
+    console.error('فشل إرسال إشعار للأدمن (Markdown):', e.message);
+    // محاولة ثانية بدون تنسيق — أغلب حالات الفشل بسبب Markdown
+    try {
+      const plain = String(text).replace(/[*_`]/g, '');
+      await bot.telegram.sendMessage(CONFIG.ADMIN_CHAT_ID, plain);
+      console.log('notifyAdmin: نجح الإرسال بدون تنسيق');
+      return true;
+    } catch (e2) {
+      console.error('فشل إرسال إشعار للأدمن (نص عادي):', e2.message);
+      console.error('تأكد أن الأدمن أرسل /start للبوت وأن ADMIN_CHAT_ID صحيح:', CONFIG.ADMIN_CHAT_ID);
+      return false;
+    }
+  }
+}
+
+// إرسال رسالة لأي مستخدم عبر البوت مع fallback بدون تنسيق
+async function sendToUser(userId, text) {
+  try {
+    await bot.telegram.sendMessage(userId, text, { parse_mode: 'Markdown' });
+    return true;
+  } catch (e) {
+    console.error(`فشل الإرسال للمستخدم ${userId} (Markdown):`, e.message);
+    try {
+      await bot.telegram.sendMessage(userId, String(text).replace(/[*_`]/g, ''));
+      return true;
+    } catch (e2) {
+      console.error(`فشل الإرسال للمستخدم ${userId} (نص عادي):`, e2.message);
+      return false;
+    }
   }
 }
 
@@ -318,9 +357,7 @@ bot.start(async (ctx) => {
         await ctx.reply(`🎁 جئت عبر رابط صديق! سيحصل صديقك على نقطة عند اشتراكك.`, { parse_mode: 'Markdown' });
       } catch {}
       // إشعار للمُحيل أنه جلب زائر
-      try {
-        await bot.telegram.sendMessage(referrerId, `👀 زائر جديد دخل عبر رابطك! عندما يشترك سيُحسب لك +1 نحو جائزة 10 زبائن = مدى الحياة مجاناً.`, { parse_mode: 'Markdown' });
-      } catch {}
+      await sendToUser(referrerId, `👀 زائر جديد دخل عبر رابطك! عندما يشترك سيُحسب لك +1 نحو جائزة 10 زبائن = مدى الحياة مجاناً.`);
     }
   }
   saveStore(store);
@@ -445,9 +482,8 @@ bot.command('reward', async (ctx) => {
   store.referrals[targetId].rewarded = true;
   saveStore(store);
   await ctx.reply(`✅ تم تأكيد مكافأة المستخدم ${targetId} (10 إحالات = مدى الحياة).`);
-  try {
-    await bot.telegram.sendMessage(targetId, `🎉 تم تفعيل مكافأتك! 🎁\nحصلت على *اشتراك مدى الحياة مجاناً* لإحالتك 10 زبائن. تواصل مع الأدمن لاستلام مفتاحك إن لم يصلك بعد.`, { parse_mode: 'Markdown' });
-  } catch {}
+  const okReward = await sendToUser(targetId, `🎉 تم تفعيل مكافأتك! 🎁\nحصلت على *اشتراك مدى الحياة مجاناً* لإحالتك 10 زبائن. تواصل مع الأدمن لاستلام مفتاحك إن لم يصلك بعد.`);
+  if (!okReward) await ctx.reply(`⚠️ تعذر إبلاغ ${targetId} (ربما حظر البوت).`);
 });
 bot.command('referrals', async (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply('⛔ للأدمن فقط.');
@@ -458,6 +494,31 @@ bot.command('referrals', async (ctx) => {
     text += `${i+1}. \`${uid}\` — ${r.count}/10 ${r.rewarded ? '✅' : ''} — ${r.code}\n`;
   });
   await ctx.replyWithMarkdown(text);
+});
+
+// معرف المستخدم الحالي (يساعد الزبون والأدمن)
+bot.command('id', async (ctx) => {
+  await ctx.reply(`🆔 معرفك: \`${ctx.from.id}\`` + (ctx.from.username ? `\n👤 @${ctx.from.username}` : ''), { parse_mode: 'Markdown' });
+});
+
+// فحص اتصال الأدمن: يكشف سبب عدم وصول الإشعارات
+bot.command('testadmin', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ للأدمن فقط.');
+  const configured = CONFIG.ADMIN_CHAT_ID || '(فارغ!)';
+  await ctx.reply(`🔧 ADMIN_CHAT_ID المضبوط: \`${configured}\`\n🆔 معرفك الحالي: \`${ctx.from.id}\`\nسأحاول إرسال رسالة اختبار الآن...`, { parse_mode: 'Markdown' });
+  const ok = await notifyAdmin('✅ رسالة اختبار من البوت — الإشعارات تعمل!');
+  await ctx.reply(ok ? '✅ وصلت رسالة الاختبار — الإشعارات سليمة.' : '❌ لم تصل! راجع سجلات السيرفر (Render Logs) لمعرفة السبب.');
+});
+
+// إرسال رسالة/مفتاح لأي زبون عبر البوت (يضمن الوصول حتى لو حظر الخاص)
+bot.command('send', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ للأدمن فقط.');
+  const parts = ctx.message.text.split(/\s+/);
+  const targetId = parts[1] ? String(parts[1]).replace(/[^0-9]/g, '') : null;
+  const msg = parts.slice(2).join(' ');
+  if (!targetId || !msg) return ctx.reply('استخدم: /send <userId> <الرسالة>\nمثال:\n/send 8733033764 🔑 مفتاحك: YF24-F-XXXX-XXXX-XXXX');
+  const ok = await sendToUser(targetId, msg);
+  await ctx.reply(ok ? `✅ تم الإرسال إلى ${targetId}` : `❌ فشل الإرسال إلى ${targetId} — ربما حظر البوت أو لم يبدأه. راجع السجلات.`);
 });
 // ===== إدارة صور الترحيب (احترافية) =====
 bot.command('setwelcome', async (ctx) => {
@@ -595,8 +656,12 @@ bot.action('subscribe', async (ctx) => {
 });
 bot.action('support', async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.reply('📞 تم إرسال طلبك للدعم، سيتواصل معك فريقنا قريباً.', backKeyboard());
-  await notifyAdmin(`📞 *طلب دعم جديد*\nمن: ${customerLabel(ctx)}`);
+  const ok = await notifyAdmin(`📞 *طلب دعم جديد*\nمن: ${customerLabel(ctx)}\nللرد عليه استخدم: \`/send ${ctx.from.id} نص الرسالة\``);
+  if (ok) {
+    await ctx.reply('📞 تم إرسال طلبك للدعم، سيتواصل معك فريقنا قريباً.', backKeyboard());
+  } else {
+    await ctx.reply('⚠️ تعذر إرسال طلب الدعم حالياً. تواصل مباشرة عبر: https://t.me/YousFarmDZ_bot', backKeyboard());
+  }
 });
 bot.action('referral', async (ctx) => {
   await ctx.answerCbQuery();
@@ -652,11 +717,13 @@ bot.on('photo', async (ctx, next) => {
   await ctx.replyWithMarkdown(proofReceivedText(), mainMenuKeyboard());
 
   // إشعار للأدمن مع أزرار سريعة
+  // ملاحظة: داخل ` ` لا نهرب المحتوى حتى لا تظهر شرطات مائلة
   const adminCaption =
     `🔔 *إثبات دفع جديد*\n\n` +
     `👤 الزبون: ${customerLabel(ctx)}\n` +
-    `🆔 معرّف الجهاز: \`${escapeMarkdown(ctx.session.deviceId)}\`\n` +
+    `🆔 معرّف الجهاز: \`${ctx.session.deviceId}\`\n` +
     `💰 السعر المتوقع: ${escapeMarkdown(CONFIG.PRICES.yearly)} / ${escapeMarkdown(CONFIG.PRICES.lifetime)}\n\n` +
+    `للرد على الزبون: \`/send ${ctx.from.id} نص الرسالة\`\n\n` +
     `اختر إجراء:`;
 
   const adminKeyboard = Markup.inlineKeyboard([
@@ -722,37 +789,30 @@ bot.action(/approve_(.+)_YF-.+/, async (ctx) => {
             `لتأكيد المنح: /reward ${referrerId}`,
             { parse_mode: 'Markdown' }
           );
-          try {
-            await bot.telegram.sendMessage(referrerId,
-              `🎉 *مبروك!* أكملت *10 إحالات* بنجاح! 🎁\n` +
-              `استحققت *اشتراك مدى الحياة مجاناً* — سيتواصل معك الأدمن قريباً لإرسال المفتاح. شكراً لجهودك! 🙏`,
-              { parse_mode: 'Markdown' });
-          } catch {}
+          const okCongrats = await sendToUser(referrerId,
+            `🎉 *مبروك!* أكملت *10 إحالات* بنجاح! 🎁\n` +
+            `استحققت *اشتراك مدى الحياة مجاناً* — سيتواصل معك الأدمن قريباً لإرسال المفتاح. شكراً لجهودك! 🙏`);
+          if (!okCongrats) await ctx.reply(`⚠️ تعذر إبلاغ المُحيل ${referrerId} (ربما حظر البوت).`);
         } else if (ref.count < 10) {
-          try {
-            await bot.telegram.sendMessage(referrerId,
-              `👏 إحالة جديدة! لديك الآن *${ref.count}/10* — تبقى *${10 - ref.count}* للحصول على مدى الحياة مجاناً! 🎁`,
-              { parse_mode: 'Markdown' });
-          } catch {}
+          await sendToUser(referrerId,
+            `👏 إحالة جديدة! لديك الآن *${ref.count}/10* — تبقى *${10 - ref.count}* للحصول على مدى الحياة مجاناً! 🎁`);
         }
       }
     }
   } catch (e) { console.error('referral increment error', e.message); }
-  await ctx.editMessageCaption(`✅ تمت الموافقة — تواصل مع المستخدم ${userId} وأرسل له المفتاح.${discountNote}${referralNote}`, { parse_mode: 'Markdown' });
-  try {
-    let userMsg = '✅ تم تأكيد الدفع! سيصلك مفتاح الترخيص خلال دقائق من الأدمن. شكراً لثقتك 🙏';
-    if (discountNote) userMsg += `\n\n🎉 مبروك! استفدت من خصم ${CONFIG.DISCOUNT.amount} دج لأول ${CONFIG.DISCOUNT.limit} مشترك!`;
-    await bot.telegram.sendMessage(userId, userMsg, { parse_mode: 'Markdown' });
-  } catch {}
+  await ctx.editMessageCaption(`✅ تمت الموافقة — تواصل مع المستخدم ${userId} وأرسل له المفتاح.${discountNote}${referralNote}\nللإرسال عبر البوت: \`/send ${userId} المفتاح\``, { parse_mode: 'Markdown' });
+  let userMsg = '✅ تم تأكيد الدفع! سيصلك مفتاح الترخيص خلال دقائق من الأدمن. شكراً لثقتك 🙏';
+  if (discountNote) userMsg += `\n\n🎉 مبروك! استفدت من خصم ${CONFIG.DISCOUNT.amount} دج لأول ${CONFIG.DISCOUNT.limit} مشترك!`;
+  const okUser = await sendToUser(userId, userMsg);
+  if (!okUser) await ctx.reply(`⚠️ تعذر إبلاغ الزبون ${userId} (ربما حظر البوت). أرسل له المفتاح يدوياً.`);
 });
 bot.action(/reject_(.+)/, async (ctx) => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('⛔ للأدمن فقط');
   const userId = ctx.match[1];
   await ctx.answerCbQuery('تم الرفض');
   await ctx.editMessageCaption(`❌ تم الرفض للمستخدم ${userId}.`, { parse_mode: 'Markdown' });
-  try {
-    await bot.telegram.sendMessage(userId, '❌ عذراً، لم يتم قبول إثبات الدفع. يرجى التأكد من وضوح الصورة والمحاولة مجدداً أو التواصل مع الدعم.', { parse_mode: 'Markdown' });
-  } catch {}
+  const okUser = await sendToUser(userId, '❌ عذراً، لم يتم قبول إثبات الدفع. يرجى التأكد من وضوح الصورة والمحاولة مجدداً أو التواصل مع الدعم.');
+  if (!okUser) await ctx.reply(`⚠️ تعذر إبلاغ الزبون ${userId} بالرفض (ربما حظر البوت).`);
 });
 
 // أي نص غير متوقع
@@ -776,6 +836,11 @@ bot.launch()
       console.log(`✅ بوت تيليجرام يعمل الآن - ${CONFIG.APP_NAME} (@${cachedBotUsername})`);
     } catch {
       console.log('✅ بوت تيليجرام يعمل الآن - ' + CONFIG.APP_NAME);
+    }
+    if (CONFIG.ADMIN_CHAT_ID) {
+      console.log(`🔧 ADMIN_CHAT_ID مضبوط: ...${String(CONFIG.ADMIN_CHAT_ID).slice(-4)}`);
+    } else {
+      console.error('❌ ADMIN_CHAT_ID فارغ! الإشعارات لن تصل. أضفه في .env أو متغيرات Render.');
     }
   })
   .catch((e) => {
