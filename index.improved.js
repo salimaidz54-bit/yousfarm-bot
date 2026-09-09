@@ -8,7 +8,6 @@ require('dotenv').config();
 const { Telegraf, Markup, session } = require('telegraf');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 
 // ==================== إعدادات آمنة (من ملف .env) ====================
 // أنشئ ملف .env بجانب index.js وضع فيه:
@@ -33,31 +32,6 @@ const CONFIG = {
     enabled: (process.env.DISCOUNT_ENABLED || 'true') === 'true',
   },
 };
-
-// ==================== توليد مفاتيح الترخيص (مطابق للتطبيق) ====================
-const LICENSE_SECRET = 'YF2024SEC';
-const TYPE_CODES = ['TR4','TR3','TR7','TR0','M','Y','F'];
-function normalizeDeviceId(input) {
-  if (!input) return null;
-  let s = String(input).trim().toUpperCase();
-  // أزل بادئة YF- إن وجدت (ليست جزءاً من الـ hex)
-  s = s.replace(/^YF-?/, '');
-  s = s.replace(/[^A-F0-9]/g, '');
-  if (s.length < 4) return null;
-  if (s.length > 32) s = s.slice(0, 32);
-  return s.toLowerCase();
-}
-function generateLicenseKey(deviceIdInput, typeCode = 'F') {
-  if (!TYPE_CODES.includes(typeCode)) throw new Error('Invalid typeCode ' + typeCode);
-  const deviceId = normalizeDeviceId(deviceIdInput);
-  if (!deviceId) throw new Error('Invalid deviceId');
-  const input = `${deviceId}::${LICENSE_SECRET}::${typeCode}`;
-  const hash = crypto.createHash('sha256').update(input, 'utf8').digest('hex');
-  return `YF24-${typeCode}-${hash.slice(0,4).toUpperCase()}-${hash.slice(4,8).toUpperCase()}-${hash.slice(8,12).toUpperCase()}`;
-}
-function getTypeForPricing(isLifetime) {
-  return isLifetime ? 'F' : 'Y';
-}
 
 // تحقق إقلاعي
 if (!CONFIG.BOT_TOKEN) {
@@ -485,22 +459,6 @@ bot.command('referrals', async (ctx) => {
   });
   await ctx.replyWithMarkdown(text);
 });
-bot.command('genkey', async (ctx) => {
-  if (!isAdmin(ctx)) return ctx.reply('⛔ للأدمن فقط.');
-  const args = ctx.message.text.split(/\s+/);
-  const deviceId = args[1];
-  const type = (args[2] || 'F').toUpperCase();
-  if (!deviceId) return ctx.reply('استخدم: /genkey <deviceId> [Y|F]\nمثال: /genkey YF-ABCD-1234-EFGH-5678 F\nY= سنة، F= مدى الحياة');
-  if (!TYPE_CODES.includes(type)) return ctx.reply(`نوع غير صالح. الأنواع: ${TYPE_CODES.join(', ')}`);
-  try {
-    const key = generateLicenseKey(deviceId, type);
-    // داخل ` ` لا نهرب المحتوى
-    await ctx.replyWithMarkdown(`🔑 *المفتاح (${type === 'Y' ? 'سنة' : type === 'F' ? 'مدى الحياة' : type}):*\n\`${key}\`\nللجهاز: \`${deviceId}\``, { parse_mode: 'Markdown' });
-  } catch (e) {
-    await ctx.reply(`⚠️ فشل: ${e.message}`);
-  }
-});
-
 // ===== إدارة صور الترحيب (احترافية) =====
 bot.command('setwelcome', async (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply('⛔ للأدمن فقط.');
@@ -655,8 +613,7 @@ const DEVICE_ID_REGEX = /^YF-[A-Z0-9]{4,}-[A-Z0-9-]{4,}$/i; // يتماشى مع
 
 bot.on('text', async (ctx, next) => {
   if (ctx.session.state !== 'awaiting_device_id') return next();
-  // نزيل الشرطات المائلة التي قد تأتي من نسخ Markdown (YF\-XXXX)
-  const trimmed = ctx.message.text.trim().replace(/\\/g, '').replace(/\s+/g, '');
+  const trimmed = ctx.message.text.trim().replace(/\s+/g, '');
   if (!DEVICE_ID_REGEX.test(trimmed)) {
     await ctx.replyWithMarkdown(invalidDeviceIdText(), cancelKeyboard());
     return;
@@ -698,12 +655,12 @@ bot.on('photo', async (ctx, next) => {
   const adminCaption =
     `🔔 *إثبات دفع جديد*\n\n` +
     `👤 الزبون: ${customerLabel(ctx)}\n` +
-    `🆔 معرّف الجهاز: \`${ctx.session.deviceId}\`\n` +
+    `🆔 معرّف الجهاز: \`${escapeMarkdown(ctx.session.deviceId)}\`\n` +
     `💰 السعر المتوقع: ${escapeMarkdown(CONFIG.PRICES.yearly)} / ${escapeMarkdown(CONFIG.PRICES.lifetime)}\n\n` +
     `اختر إجراء:`;
 
   const adminKeyboard = Markup.inlineKeyboard([
-    [Markup.button.callback('✅ سنة (Y)', `approve_${ctx.from.id}_${ctx.session.deviceId}_Y`), Markup.button.callback('♾️ مدى الحياة (F)', `approve_${ctx.from.id}_${ctx.session.deviceId}_F`)],
+    [Markup.button.callback('✅ تأكيد وإرسال المفتاح', `approve_${ctx.from.id}_${ctx.session.deviceId}`)],
     [Markup.button.callback('❌ رفض', `reject_${ctx.from.id}`)],
   ]);
 
@@ -731,11 +688,9 @@ bot.on('photo', async (ctx) => {
 });
 
 // معالجة أزرار الأدمن للموافقة/الرفض
-bot.action(/approve_(\d+)_(YF-[A-Z0-9-]+)(?:_([YF]))?/i, async (ctx) => {
+bot.action(/approve_(.+)_YF-.+/, async (ctx) => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('⛔ للأدمن فقط');
   const userId = ctx.match[1];
-  const deviceId = ctx.match[2];
-  const typeCode = (ctx.match[3] || 'F').toUpperCase();
   await ctx.answerCbQuery('تم التأكيد');
   // عدّاد الخصم لأول 50
   let discountNote = '';
@@ -783,26 +738,9 @@ bot.action(/approve_(\d+)_(YF-[A-Z0-9-]+)(?:_([YF]))?/i, async (ctx) => {
       }
     }
   } catch (e) { console.error('referral increment error', e.message); }
-  // توليد المفتاح تلقائياً (Y للسنة، F للمدى الحياة)
-  let generatedKey = null;
-  let keyNote = '';
+  await ctx.editMessageCaption(`✅ تمت الموافقة — تواصل مع المستخدم ${userId} وأرسل له المفتاح.${discountNote}${referralNote}`, { parse_mode: 'Markdown' });
   try {
-    generatedKey = generateLicenseKey(deviceId, typeCode);
-    keyNote = `\n🔑 المفتاح (${typeCode === 'Y' ? 'سنة' : 'مدى الحياة'}): \`${generatedKey}\``;
-  } catch (e) {
-    console.error('key generation failed:', e.message);
-    keyNote = `\n⚠️ فشل توليد المفتاح — أرسله يدوياً`;
-  }
-  await ctx.editMessageCaption(`✅ تمت الموافقة (${typeCode === 'Y' ? 'سنة' : 'مدى الحياة'}) — المستخدم ${userId}${discountNote}${referralNote}${keyNote}`, { parse_mode: 'Markdown' });
-  try {
-    let userMsg = `✅ تم تأكيد الدفع! 🎉\n\n`;
-    if (generatedKey) {
-      userMsg += `🔑 *مفتاحك الخاص (${typeCode === 'Y' ? 'سنة' : 'مدى الحياة'}):*\n\`${generatedKey}\`\n\n` +
-        `انسخه والصقه في التطبيق → شاشة التفعيل → *تفعيل*.\n` +
-        `معرّف جهازك: \`${deviceId}\``;
-    } else {
-      userMsg += `سيصلك مفتاح الترخيص خلال دقائق من الأدمن.`;
-    }
+    let userMsg = '✅ تم تأكيد الدفع! سيصلك مفتاح الترخيص خلال دقائق من الأدمن. شكراً لثقتك 🙏';
     if (discountNote) userMsg += `\n\n🎉 مبروك! استفدت من خصم ${CONFIG.DISCOUNT.amount} دج لأول ${CONFIG.DISCOUNT.limit} مشترك!`;
     await bot.telegram.sendMessage(userId, userMsg, { parse_mode: 'Markdown' });
   } catch {}
