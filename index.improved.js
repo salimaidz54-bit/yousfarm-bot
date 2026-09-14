@@ -1,4 +1,4 @@
-/**
+﻿/**
  * بوت تيليجرام احترافي - متجر مصغّر لبيع وتفعيل وتحميل تطبيق YousFarm
  * نسخة محسّنة: أمان + تحقق صارم + تجربة مستخدم احترافية
  * مبني بـ Telegraf - Telegram Bot API
@@ -15,9 +15,14 @@ const crypto = require('crypto');
 // BOT_TOKEN=837619... (من @BotFather)
 // ADMIN_CHAT_ID=6190616202
 // APP_NAME=YousFarm
+function parseAdminIds() {
+  const raw = process.env.ADMIN_CHAT_IDS || process.env.ADMIN_CHAT_ID || '';
+  return String(raw).split(',').map(s => s.trim()).filter(s => /^\d+$/.test(s));
+}
 const CONFIG = {
   BOT_TOKEN: process.env.BOT_TOKEN || '',
   ADMIN_CHAT_ID: process.env.ADMIN_CHAT_ID || '',
+  ADMIN_IDS: parseAdminIds(),
   APP_NAME: process.env.APP_NAME || 'YousFarm',
   PRICES: {
     yearly: process.env.PRICE_YEARLY || '1900 دج / السنة',
@@ -32,6 +37,11 @@ const CONFIG = {
     limit: parseInt(process.env.DISCOUNT_LIMIT || '50', 10),
     enabled: (process.env.DISCOUNT_ENABLED || 'true') === 'true',
   },
+  FB: {
+    pageId: process.env.FB_PAGE_ID || '',
+    token: process.env.FB_PAGE_TOKEN || '',
+  },
+  LANDING_URL: process.env.LANDING_URL || 'https://jolly-fudge-0463e0.netlify.app',
 };
 
 // ==================== توليد مفاتيح الترخيص (مطابق تماماً لكود التطبيق JS) ====================
@@ -63,8 +73,8 @@ if (!CONFIG.BOT_TOKEN) {
   console.error('❌ BOT_TOKEN مفقود! ضعه في ملف .env');
   process.exit(1);
 }
-if (!CONFIG.ADMIN_CHAT_ID) {
-  console.warn('⚠️ ADMIN_CHAT_ID غير مضبوط - لن تصل إشعارات الأدمن');
+if (!CONFIG.ADMIN_IDS.length) {
+  console.warn('⚠️ ADMIN_CHAT_ID(S) غير مضبوط - لن تصل إشعارات الأدمن');
 }
 
 // سيرفر صغير لفحص الصحة (مطلوب لمنصات مثل Render التي تتوقع منفذ HTTP)
@@ -128,7 +138,7 @@ function escapeMarkdown(text) {
 }
 
 function isAdmin(ctx) {
-  return String(ctx.from?.id) === String(CONFIG.ADMIN_CHAT_ID);
+  return CONFIG.ADMIN_IDS.includes(String(ctx.from?.id));
 }
 
 // حماية سبام بسيطة: حد 10 رسائل / دقيقة لكل مستخدم
@@ -180,28 +190,129 @@ function customerLabelPlain(ctx) {
   return `${name} — ${uname} — ID: ${u.id}`;
 }
 
-async function notifyAdmin(text, extra = {}) {
-  if (!CONFIG.ADMIN_CHAT_ID) {
-    console.error('notifyAdmin: ADMIN_CHAT_ID غير مضبوط!');
-    return false;
-  }
+async function notifyOneAdmin(adminId, text, extra = {}) {
   try {
-    await bot.telegram.sendMessage(CONFIG.ADMIN_CHAT_ID, text, { parse_mode: 'Markdown', ...extra });
+    await bot.telegram.sendMessage(adminId, text, { parse_mode: 'Markdown', ...extra });
     return true;
   } catch (e) {
-    console.error('فشل إرسال إشعار للأدمن (Markdown):', e.message);
-    // محاولة ثانية بدون تنسيق — أغلب حالات الفشل بسبب Markdown
     try {
-      const plain = String(text).replace(/[*_`]/g, '');
-      await bot.telegram.sendMessage(CONFIG.ADMIN_CHAT_ID, plain);
-      console.log('notifyAdmin: نجح الإرسال بدون تنسيق');
+      await bot.telegram.sendMessage(adminId, String(text).replace(/[*_`]/g, ''));
       return true;
     } catch (e2) {
-      console.error('فشل إرسال إشعار للأدمن (نص عادي):', e2.message);
-      console.error('تأكد أن الأدمن أرسل /start للبوت وأن ADMIN_CHAT_ID صحيح:', CONFIG.ADMIN_CHAT_ID);
+      console.error(`فشل الإشعار للأدمن ${adminId}:`, e2.message);
       return false;
     }
   }
+}
+async function notifyAdmin(text, extra = {}) {
+  if (!CONFIG.ADMIN_IDS.length) {
+    console.error('notifyAdmin: لا يوجد أدمن مضبوط!');
+    return false;
+  }
+  let ok = false;
+  for (const id of CONFIG.ADMIN_IDS) {
+    if (await notifyOneAdmin(id, text, extra)) ok = true;
+  }
+  if (!ok) console.error('تعذر إشعار أي أدمن. تأكد أن كل أدمن أرسل /start للبوت.');
+  return ok;
+}
+
+// ==================== النشر على فيسبوك (مجاني عبر Graph API) ====================
+function fbConfigured() {
+  return !!(CONFIG.FB.pageId && CONFIG.FB.token);
+}
+async function tgDownloadBuffer(fileId) {
+  const f = await bot.telegram.getFile(fileId);
+  const url = `https://api.telegram.org/file/bot${CONFIG.BOT_TOKEN}/${f.file_path}`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('TG download ' + r.status);
+  return Buffer.from(await r.arrayBuffer());
+}
+async function fbPublishText(message) {
+  const r = await fetch(`https://graph.facebook.com/v21.0/${CONFIG.FB.pageId}/feed`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, access_token: CONFIG.FB.token }),
+  });
+  return r.json();
+}
+async function fbPublishPhoto(buffer, filename, caption) {
+  const fd = new FormData();
+  fd.append('source', new Blob([buffer]), filename || 'photo.jpg');
+  fd.append('caption', caption || '');
+  fd.append('access_token', CONFIG.FB.token);
+  const r = await fetch(`https://graph.facebook.com/v21.0/${CONFIG.FB.pageId}/photos`, { method: 'POST', body: fd });
+  return r.json();
+}
+async function fbPublishVideo(buffer, filename, description) {
+  const fd = new FormData();
+  fd.append('source', new Blob([buffer]), filename || 'video.mp4');
+  fd.append('description', description || '');
+  fd.append('access_token', CONFIG.FB.token);
+  const r = await fetch(`https://graph.facebook.com/v21.0/${CONFIG.FB.pageId}/videos`, { method: 'POST', body: fd });
+  return r.json();
+}
+function fbPostUrl(result) {
+  if (result && result.post_id) return `https://www.facebook.com/${result.post_id}`;
+  if (result && result.id) return `https://www.facebook.com/${result.id}`;
+  return null;
+}
+async function handleFbPublish(ctx, kind, fileId, filename, rawCaption) {
+  if (!fbConfigured()) {
+    await ctx.reply('⚠️ النشر على فيسبوك غير مضبوط. أضف FB_PAGE_ID و FB_PAGE_TOKEN في .env ثم أعد التشغيل. (/fbtest للفحص)');
+    return;
+  }
+  const caption = String(rawCaption || '').replace(/#نشر/g, '').trim() || `${CONFIG.APP_NAME} 🐔\n${CONFIG.LANDING_URL}`;
+  const wait = await ctx.reply('⏳ جاري النشر على صفحة فيسبوك...');
+  try {
+    let res;
+    if (kind === 'photo') res = await fbPublishPhoto(await tgDownloadBuffer(fileId), filename, caption);
+    else if (kind === 'video') res = await fbPublishVideo(await tgDownloadBuffer(fileId), filename, caption);
+    else if (kind === 'document') {
+      const buf = await tgDownloadBuffer(fileId);
+      const isVideo = /mp4|mov|avi|mkv/i.test(filename || '');
+      res = isVideo ? await fbPublishVideo(buf, filename, caption) : await fbPublishPhoto(buf, filename, caption);
+    }
+    else res = await fbPublishText(caption);
+    if (res && !res.error) {
+      const link = fbPostUrl(res);
+      console.log(`[FB] published ${kind} id=${res.post_id || res.id}`);
+      // مشاركة المنشور في المجموعات يدوياً بنقرة (النشر المباشر في المجموعات موقوف من Meta)
+      const shareKb = link
+        ? Markup.inlineKeyboard([[Markup.button.url('📤 مشاركة في المجموعات', 'https://www.facebook.com/sharer/sharer.php?u=' + encodeURIComponent(link))]])
+        : undefined;
+      await ctx.reply(`✅ تم النشر على فيسبوك! 🎉${link ? '\n🔗 ' + link : ''}\n\n👥 للمجموعات: اضغط الزر أدناه واختر مجموعاتك (مربي الدواجن، السوق...).`, shareKb);
+    } else {
+      console.error('FB publish error:', JSON.stringify(res && res.error));
+      await ctx.reply(`❌ فشل النشر: ${(res && res.error && res.error.message) || 'خطأ غير معروف'}\nجرّب /fbtest لفحص التوكن.`);
+    }
+  } catch (e) {
+    console.error('FB publish exception:', e.message);
+    await ctx.reply(`❌ تعذر النشر: ${e.message}`);
+  } finally {
+    try { await ctx.deleteMessage(wait.message_id); } catch {}
+  }
+}
+
+// ==================== عدة تيكتوك (تجهيز بنقرة واحدة) ====================
+const TT_HASHTAGS = '#YousFarm #دواجن #الجزائر #مربي_الدواجن #مشاريع_صغيرة #تطبيق';
+function tiktokCaption(base) {
+  const core = (base && String(base).replace(/#تيكتوك/g, '').trim()) || `${CONFIG.APP_NAME} 🐔 — إدارة مبيعات الدواجن: فواتير، تقارير، طباعة حرارية. جرّب 4 أيام مجاناً!`;
+  return `${core}\n\n📥 حمّل من هنا: ${CONFIG.LANDING_URL}\n\n${TT_HASHTAGS}`;
+}
+async function sendTiktokKit(ctx, baseCaption) {
+  const cap = tiktokCaption(baseCaption);
+  await ctx.reply(
+    `🎵 *عدة النشر على تيكتوك*\n\nانسخ النص أدناه والصقه في تيكتوك:\n\n\`${cap}\`\n\n` +
+    `الخطوات: افتح زر الرفع أدناه ← اختر الفيديو ← الصق النص ← انشر ✅`,
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.url('📤 فتح رفع تيكتوك', 'https://www.tiktok.com/upload')],
+        [Markup.button.url('📥 صفحة التحميل', CONFIG.LANDING_URL)],
+      ]),
+    }
+  );
 }
 
 // إرسال رسالة لأي مستخدم عبر البوت مع fallback بدون تنسيق
@@ -529,8 +640,8 @@ bot.command('id', async (ctx) => {
 // فحص اتصال الأدمن: يكشف سبب عدم وصول الإشعارات
 bot.command('testadmin', async (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply('⛔ للأدمن فقط.');
-  const configured = CONFIG.ADMIN_CHAT_ID || '(فارغ!)';
-  await ctx.reply(`🔧 ADMIN_CHAT_ID المضبوط: \`${configured}\`\n🆔 معرفك الحالي: \`${ctx.from.id}\`\nسأحاول إرسال رسالة اختبار الآن...`, { parse_mode: 'Markdown' });
+  const configured = CONFIG.ADMIN_IDS.length ? CONFIG.ADMIN_IDS.join(', ') : '(فارغ!)';
+  await ctx.reply(`🔧 الأدمن المضبوطون: \`${configured}\`\n🆔 معرفك الحالي: \`${ctx.from.id}\`\nسأحاول إرسال رسالة اختبار الآن...`, { parse_mode: 'Markdown' });
   const ok = await notifyAdmin('✅ رسالة اختبار من البوت — الإشعارات تعمل!');
   await ctx.reply(ok ? '✅ وصلت رسالة الاختبار — الإشعارات سليمة.' : '❌ لم تصل! راجع سجلات السيرفر (Render Logs) لمعرفة السبب.');
 });
@@ -544,6 +655,28 @@ bot.command('send', async (ctx) => {
   if (!targetId || !msg) return ctx.reply('استخدم: /send <userId> <الرسالة>\nمثال:\n/send 8733033764 🔑 مفتاحك: YF24-F-XXXX-XXXX-XXXX');
   const ok = await sendToUser(targetId, msg);
   await ctx.reply(ok ? `✅ تم الإرسال إلى ${targetId}` : `❌ فشل الإرسال إلى ${targetId} — ربما حظر البوت أو لم يبدأه. راجع السجلات.`);
+});
+// فحص اتصال فيسبوك
+bot.command('fbtest', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ للأدمن فقط.');
+  if (!fbConfigured()) return ctx.reply('⚠️ أضف FB_PAGE_ID و FB_PAGE_TOKEN في .env (أو متغيرات Render) ثم أعد التشغيل.');
+  try {
+    const r = await fetch(`https://graph.facebook.com/v21.0/me?access_token=${CONFIG.FB.token}`);
+    const j = await r.json();
+    if (j.error) {
+      await ctx.reply(`❌ التوكن مرفوض: ${j.error.message}`);
+    } else {
+      await ctx.reply(`✅ متصل! الصفحة: ${j.name || ''} (ID: ${j.id})\nللنشر: أرسل صورة/فيديو/نص مع #نشر في التعليق.`);
+    }
+  } catch (e) {
+    await ctx.reply(`❌ تعذر الاتصال بفيسبوك: ${e.message}`);
+  }
+});
+// عدة تيكتوك
+bot.command('tt', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ للأدمن فقط.');
+  const base = ctx.message.text.split(/\s+/).slice(1).join(' ');
+  await sendTiktokKit(ctx, base);
 });
 // توليد مفتاح يدوياً لأي معرف (بنفس خوارزمية التطبيق)
 bot.command('genkey', async (ctx) => {
@@ -707,11 +840,26 @@ bot.action('subscribe', async (ctx) => {
 });
 bot.action('support', async (ctx) => {
   await ctx.answerCbQuery();
-  const ok = await notifyAdmin(`📞 *طلب دعم جديد*\nمن: ${customerLabel(ctx)}\nللرد عليه استخدم: \`/send ${ctx.from.id} نص الرسالة\``);
+  ctx.session.state = 'support_chat';
+  await ctx.reply(
+    '📞 *الدعم الفني*\n\nاكتب رسالتك الآن (نص أو صورة) وسأوصلها مباشرة لفريق الدعم.\nللخروج من المحادثة اضغط /cancel أو 🔙 القائمة الرئيسية.',
+    { parse_mode: 'Markdown', ...cancelKeyboard() }
+  );
+});
+
+// استقبال رسائل المحادثة مع الدعم (نص) وتمريرها للأدمن
+bot.on('text', async (ctx, next) => {
+  if (!ctx.session || ctx.session.state !== 'support_chat') return next();
+  const msg = ctx.message.text.trim();
+  if (!msg) return next();
+  console.log(`[SUPPORT] msg from ${ctx.from.id}: ${msg.slice(0, 80)}`);
+  const ok = await notifyAdmin(
+    `📞 *رسالة دعم جديدة*\nمن: ${customerLabel(ctx)}\n\n💬 ${escapeMarkdown(msg.length > 1500 ? msg.slice(0, 1500) + '…' : msg)}\n\nللرد: \`/send ${ctx.from.id} نص الرد\``
+  );
   if (ok) {
-    await ctx.reply('📞 تم إرسال طلبك للدعم، سيتواصل معك فريقنا قريباً.', backKeyboard());
+    await ctx.reply('✅ وصلت رسالتك للدعم، سيرد عليك قريباً. يمكنك إرسال المزيد أو /cancel للإنهاء.', cancelKeyboard());
   } else {
-    await ctx.reply('⚠️ تعذر إرسال طلب الدعم حالياً. تواصل مباشرة عبر: https://t.me/YousFarmDZ_bot', backKeyboard());
+    await ctx.reply('⚠️ تعذر الإرسال حالياً. تواصل مباشرة عبر: https://t.me/YousFarmDZ_bot', cancelKeyboard());
   }
 });
 bot.action('referral', async (ctx) => {
@@ -776,8 +924,8 @@ async function forwardProofToAdmin(ctx, fileId, isDocument) {
   ]);
 
   const sendFn = isDocument
-    ? (cap) => bot.telegram.sendDocument(CONFIG.ADMIN_CHAT_ID, fileId, { caption: cap, parse_mode: 'Markdown', ...adminKeyboard })
-    : (cap) => bot.telegram.sendPhoto(CONFIG.ADMIN_CHAT_ID, fileId, { caption: cap, parse_mode: 'Markdown', ...adminKeyboard });
+    ? (cap) => bot.telegram.sendDocument(CONFIG.ADMIN_IDS[0], fileId, { caption: cap, parse_mode: 'Markdown', ...adminKeyboard })
+    : (cap) => bot.telegram.sendPhoto(CONFIG.ADMIN_IDS[0], fileId, { caption: cap, parse_mode: 'Markdown', ...adminKeyboard });
   try {
     await sendFn(adminCaption);
   } catch (e) {
@@ -786,9 +934,9 @@ async function forwardProofToAdmin(ctx, fileId, isDocument) {
     try {
       const plain = adminCaption.replace(/[*_`]/g, '');
       if (isDocument) {
-        await bot.telegram.sendDocument(CONFIG.ADMIN_CHAT_ID, fileId, { caption: plain, ...adminKeyboard });
+        await bot.telegram.sendDocument(CONFIG.ADMIN_IDS[0], fileId, { caption: plain, ...adminKeyboard });
       } else {
-        await bot.telegram.sendPhoto(CONFIG.ADMIN_CHAT_ID, fileId, { caption: plain, ...adminKeyboard });
+        await bot.telegram.sendPhoto(CONFIG.ADMIN_IDS[0], fileId, { caption: plain, ...adminKeyboard });
       }
     } catch (e2) {
       console.error('فشل fallback الإثبات:', e2.message);
@@ -814,6 +962,65 @@ bot.on('photo', async (ctx, next) => {
   await forwardProofToAdmin(ctx, fileId, false);
 });
 
+// ==================== النشر بهاشتاغ (#نشر / #تيكتوك) ====================
+function msgCaption(ctx) {
+  return (ctx.message && (ctx.message.caption || ctx.message.text)) || '';
+}
+bot.on('photo', async (ctx, next) => {
+  const cap = msgCaption(ctx);
+  if (isAdmin(ctx) && cap.includes('#نشر')) {
+    const photos = ctx.message.photo;
+    await handleFbPublish(ctx, 'photo', photos[photos.length - 1].file_id, 'photo.jpg', cap);
+    return;
+  }
+  if (isAdmin(ctx) && cap.includes('#تيكتوك')) {
+    await sendTiktokKit(ctx, cap);
+    return;
+  }
+  return next();
+});
+bot.on('video', async (ctx, next) => {
+  const cap = msgCaption(ctx);
+  if (isAdmin(ctx) && cap.includes('#نشر')) {
+    await handleFbPublish(ctx, 'video', ctx.message.video.file_id, 'video.mp4', cap);
+    return;
+  }
+  if (isAdmin(ctx) && cap.includes('#تيكتوك')) {
+    await sendTiktokKit(ctx, cap);
+    return;
+  }
+  return next();
+});
+bot.on('document', async (ctx, next) => {
+  const cap = msgCaption(ctx);
+  if (isAdmin(ctx) && cap.includes('#نشر') && !(ctx.session && ctx.session.state === 'awaiting_app_upload')) {
+    const doc = ctx.message.document;
+    await handleFbPublish(ctx, 'document', doc.file_id, doc.file_name || 'file', cap);
+    return;
+  }
+  if (isAdmin(ctx) && cap.includes('#تيكتوك')) {
+    await sendTiktokKit(ctx, cap);
+    return;
+  }
+  return next();
+});
+
+// صور المحادثة مع الدعم: تمريرها للأدمن
+bot.on('photo', async (ctx, next) => {
+  if (!ctx.session || ctx.session.state !== 'support_chat') return next();
+  const photos = ctx.message.photo;
+  const fileId = photos[photos.length - 1].file_id;
+  console.log(`[SUPPORT] photo from ${ctx.from.id}`);
+  const caption = `📞 *صورة من زبون*\nمن: ${customerLabel(ctx)}\n\nللرد: \`/send ${ctx.from.id} نص الرد\``;
+  try {
+    await bot.telegram.sendPhoto(CONFIG.ADMIN_CHAT_ID, fileId, { caption, parse_mode: 'Markdown' });
+    await ctx.reply('✅ وصلت الصورة للدعم.', cancelKeyboard());
+  } catch (e) {
+    console.error('فشل تمرير صورة الدعم:', e.message);
+    await ctx.reply('⚠️ تعذر الإرسال حالياً. حاول لاحقاً أو تواصل عبر: https://t.me/YousFarmDZ_bot', cancelKeyboard());
+  }
+});
+
 // رفض الصور في حالات أخرى + تشخيص
 bot.on('photo', async (ctx) => {
   console.log(`[DIAG] photo from ${ctx.from.id}, state=${ctx.session && ctx.session.state}, hasDevice=${!!(ctx.session && ctx.session.deviceId)}`);
@@ -822,6 +1029,24 @@ bot.on('photo', async (ctx) => {
   } else if (ctx.session.state !== 'awaiting_proof') {
     await ctx.reply('⚠️ لم أفهم هذه الصورة. اضغط /start ثم 🛒 اشترك الآن واتبع الخطوات.', backKeyboard());
   }
+});
+
+// مستندات المحادثة مع الدعم: تمريرها للأدمن
+bot.on('document', async (ctx, next) => {
+  if (ctx.session && ctx.session.state === 'support_chat') {
+    const doc = ctx.message.document;
+    console.log(`[SUPPORT] document from ${ctx.from.id}, mime=${doc && doc.mime_type}`);
+    const caption = `📞 *ملف من زبون*\nمن: ${customerLabel(ctx)}\n\nللرد: \`/send ${ctx.from.id} نص الرد\``;
+    try {
+      await bot.telegram.sendDocument(CONFIG.ADMIN_CHAT_ID, doc.file_id, { caption, parse_mode: 'Markdown' });
+      await ctx.reply('✅ وصل الملف للدعم.', cancelKeyboard());
+    } catch (e) {
+      console.error('فشل تمرير ملف الدعم:', e.message);
+      await ctx.reply('⚠️ تعذر الإرسال حالياً.', cancelKeyboard());
+    }
+    return;
+  }
+  return next();
 });
 
 // تشخيص: أي مستند لم تعالجه المعالجات السابقة
@@ -907,6 +1132,20 @@ bot.action(/reject_(.+)/, async (ctx) => {
   if (!okUser) await ctx.reply(`⚠️ تعذر إبلاغ الزبون ${userId} بالرفض (ربما حظر البوت).`);
 });
 
+// نص بهاشتاغ نشر (أدمن فقط) — قبل الرد الترحيبي
+bot.on('text', async (ctx, next) => {
+  const txt = (ctx.message && ctx.message.text) || '';
+  if (isAdmin(ctx) && txt.includes('#نشر')) {
+    await handleFbPublish(ctx, 'text', null, null, txt);
+    return;
+  }
+  if (isAdmin(ctx) && txt.includes('#تيكتوك')) {
+    await sendTiktokKit(ctx, txt);
+    return;
+  }
+  return next();
+});
+
 // أي نص غير متوقع
 bot.on('text', async (ctx) => {
   if (ctx.session.state !== 'menu') return; // تم التعامل معه أعلاه
@@ -929,12 +1168,12 @@ bot.launch()
     } catch {
       console.log('✅ بوت تيليجرام يعمل الآن - ' + CONFIG.APP_NAME);
     }
-    if (CONFIG.ADMIN_CHAT_ID) {
-      console.log(`🔧 ADMIN_CHAT_ID مضبوط: ...${String(CONFIG.ADMIN_CHAT_ID).slice(-4)}`);
+    if (CONFIG.ADMIN_IDS.length) {
+      console.log(`🔧 عدد الأدمن: ${CONFIG.ADMIN_IDS.length}`);
     } else {
-      console.error('❌ ADMIN_CHAT_ID فارغ! الإشعارات لن تصل. أضفه في .env أو متغيرات Render.');
+      console.error('❌ لا يوجد أدمن! الإشعارات لن تصل. أضف ADMIN_CHAT_ID(S) في .env أو متغيرات Render.');
     }
-    console.log('🏷️ BUILD: fix-proof-diag-1 (photo+document proof + diagnostics)');
+    console.log('🏷️ BUILD: multi-admin-1 (photo+document proof + diagnostics + multi-admin)');
   })
   .catch((e) => {
     console.error('❌ فشل تشغيل البوت:', e.message);
