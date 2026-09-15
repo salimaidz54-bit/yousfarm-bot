@@ -41,7 +41,7 @@ const CONFIG = {
     pageId: process.env.FB_PAGE_ID || '',
     token: process.env.FB_PAGE_TOKEN || '',
   },
-  LANDING_URL: process.env.LANDING_URL || 'https://jolly-fudge-0463e0.netlify.app',
+  LANDING_URL: process.env.LANDING_URL || 'https://yousfarm.netlify.app',
 };
 
 // ==================== توليد مفاتيح الترخيص (مطابق تماماً لكود التطبيق JS) ====================
@@ -803,33 +803,50 @@ bot.action('payment', async (ctx) => {
 });
 bot.action('download', async (ctx) => {
   await ctx.answerCbQuery();
-  const landingUrl = 'https://jolly-fudge-0463e0.netlify.app';
+  const landingUrl = CONFIG.LANDING_URL;
   try {
-    await ctx.reply(
-      `📥 *حمّل تطبيق ${escapeMarkdown(CONFIG.APP_NAME)}*\n\n` +
-      `من صفحتنا الرسمية:\n${landingUrl}\n\n` +
-      `اضغط الزر أدناه للتحميل المباشر — حجم 4.95 MB، آمن وموقّع.`,
-      {
+    if (store.appFileId) {
+      // إرسال ملف APK مباشرة من البوت
+      await ctx.replyWithDocument(store.appFileId, {
+        caption:
+          `📥 *${escapeMarkdown(store.appFileName || CONFIG.APP_NAME)}*\n` +
+          (store.appVersion ? `النسخة: ${escapeMarkdown(String(store.appVersion))}\n` : '') +
+          (store.appSizeMb ? `الحجم: ${store.appSizeMb} MB\n` : '') +
+          `\nآمن وموقّع، وصفحتنا الرسمية:\n${landingUrl}`,
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.url('📥 تحميل مباشر', landingUrl)],
+          [Markup.button.url('🌐 صفحة الهبوط', landingUrl)],
           [Markup.button.callback('🔙 القائمة الرئيسية', 'main_menu')],
         ]),
-      }
-    );
-    // عدّاد التحميلات (يحسب كل نقرة على زر التحميل)
+      });
+      console.log(`[DOWNLOAD] #${store.downloadCount} by ${ctx.from.id} → APK مباشر`);
+    } else {
+      await ctx.reply(
+        `📥 *حمّل تطبيق ${escapeMarkdown(CONFIG.APP_NAME)}*\n\n` +
+        `من صفحتنا الرسمية:\n${landingUrl}\n\n` +
+        `اضغط الزر أدناه للتحميل المباشر — حجم 4.95 MB، آمن وموقّع.`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.url('📥 تحميل مباشر', landingUrl)],
+            [Markup.button.callback('🔙 القائمة الرئيسية', 'main_menu')],
+          ]),
+        }
+      );
+      console.log(`[DOWNLOAD] #${store.downloadCount} by ${ctx.from.id} → landing`);
+    }
+    // عدّاد التحميلات
     store.downloadCount = (store.downloadCount || 0) + 1;
     if (!store.downloadUsers) store.downloadUsers = [];
     const uid = String(ctx.from.id);
     if (!store.downloadUsers.includes(uid)) store.downloadUsers.push(uid);
     saveStore(store);
-    console.log(`[DOWNLOAD] #${store.downloadCount} by ${uid} (${ctx.from.username || ctx.from.first_name}) → landing`);
     if (store.downloadCount % 10 === 0) {
-      await notifyAdmin(`📥 *إنجاز:* ${store.downloadCount} نقرة تحميل (مستخدمين: ${store.downloadUsers.length}) عبر صفحة الهبوط`, {});
+      await notifyAdmin(`📥 *إنجاز:* ${store.downloadCount} نقرة تحميل (مستخدمين: ${store.downloadUsers.length}) عبر البوت`, {});
     }
   } catch (e) {
-    console.error('فشل إرسال رابط التحميل:', e.message);
-    await ctx.reply('⚠️ حدث خطأ، حاول مجدداً أو تواصل مع الدعم.', backKeyboard());
+    console.error('فشل إرسال التطبيق:', e.message);
+    await ctx.reply('⚠️ تعذر إرسال الملف حالياً. حمّله من صفحتنا:\n' + landingUrl, backKeyboard());
   }
 });
 bot.action('subscribe', async (ctx) => {
