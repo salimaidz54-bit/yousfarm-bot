@@ -42,6 +42,10 @@ const CONFIG = {
     token: process.env.FB_PAGE_TOKEN || '',
   },
   LANDING_URL: process.env.LANDING_URL || 'https://yousfarm.netlify.app',
+  PARTNERS: {
+    commissionPerSub: parseInt(process.env.PARTNER_COMMISSION || '300', 10),
+    minPayout: parseInt(process.env.PARTNER_MIN_PAYOUT || '5', 10),
+  },
 };
 
 // ==================== توليد مفاتيح الترخيص (مطابق تماماً لكود التطبيق JS) ====================
@@ -94,7 +98,7 @@ const STORE_TMP_PATH = path.join(__dirname, 'store.json.tmp');
 
 function loadStore() {
   try {
-    if (!fs.existsSync(STORE_PATH)) return { appFileId: null, appFileName: null, appVersion: null, appSizeMb: null, uploadedAt: null, uploadedBy: null, welcomeFileId: null, welcomeFileIds: [], downloadCount: 0, downloadUsers: [], discountUsed: 0, referrals: {} };
+    if (!fs.existsSync(STORE_PATH)) return { appFileId: null, appFileName: null, appVersion: null, appSizeMb: null, uploadedAt: null, uploadedBy: null, welcomeFileId: null, welcomeFileIds: [], downloadCount: 0, downloadUsers: [], discountUsed: 0, referrals: {}, partners: {} };
     const raw = fs.readFileSync(STORE_PATH, 'utf8');
     const data = JSON.parse(raw);
     if (typeof data !== 'object' || data === null) throw new Error('invalid store');
@@ -111,10 +115,11 @@ function loadStore() {
       downloadUsers: Array.isArray(data.downloadUsers) ? data.downloadUsers : [],
       discountUsed: typeof data.discountUsed === 'number' ? data.discountUsed : 0,
       referrals: (data.referrals && typeof data.referrals === 'object') ? data.referrals : {},
+      partners: (data.partners && typeof data.partners === 'object') ? data.partners : {},
     };
   } catch (e) {
     console.error('⚠️ فشل تحميل store.json، سيتم إنشاء جديد:', e.message);
-    return { appFileId: null, appFileName: null, appVersion: null, appSizeMb: null, uploadedAt: null, uploadedBy: null, welcomeFileId: null, welcomeFileIds: [], downloadCount: 0, downloadUsers: [], discountUsed: 0, referrals: {} };
+    return { appFileId: null, appFileName: null, appVersion: null, appSizeMb: null, uploadedAt: null, uploadedBy: null, welcomeFileId: null, welcomeFileIds: [], downloadCount: 0, downloadUsers: [], discountUsed: 0, referrals: {}, partners: {} };
   }
 }
 
@@ -181,6 +186,48 @@ function findReferrerByCode(code) {
   const referrerId = m[1];
   if (!store.referrals || !store.referrals[referrerId]) return null;
   return referrerId;
+}
+
+// ==================== نظام الشركاء (أصحاب القنوات/الصفحات) ====================
+// شريك = مالك قناة تيليجرام/فيسبوك/تيك توك بجمهور كبير. يجلب مشتركين تحويلاً -> يحصل عمولة.
+function partnerStatusText(p) {
+  if (!p) return '';
+  const map = { pending: '⏳ بانتظار الموافقة', active: '✅ نشط', blocked: '⛔ موقوف' };
+  return map[p.status] || p.status;
+}
+function ensurePartners() {
+  if (!store.partners) store.partners = {};
+  return store.partners;
+}
+function getPartnerByUserId(userId) {
+  return (store.partners || {})[String(userId)] || null;
+}
+function getPartnerByCode(code) {
+  if (!code) return null;
+  for (const [uid, p] of Object.entries(store.partners || {})) {
+    if (p.code && p.code.toUpperCase() === String(code).toUpperCase()) return { userId: uid, partner: p };
+  }
+  return null;
+}
+function makePartnerCode() {
+  // كود فريد من 6 أحرف: PART_XXXXXX
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  if (getPartnerByCode('PART_' + code)) return makePartnerCode();
+  return 'PART_' + code;
+}
+function getPartnerLink(partner, botUsername) {
+  return `https://t.me/${botUsername}?start=${partner.code}`;
+}
+function partnerPlatformLabel(platform) {
+  const map = { telegram: '📢 تيليجرام', facebook: '📘 فيسبوك', tiktok: '🎵 تيك توك', youtube: '▶️ يوتيوب', other: '🌐 أخرى' };
+  return map[platform] || platform;
+}
+function countPartnerEarned(partner) {
+  const conv = (partner && Array.isArray(partner.convertedUsers)) ? partner.convertedUsers.length : 0;
+  const paid = (partner && Array.isArray(partner.paidUsers)) ? partner.paidUsers.length : 0;
+  return Math.max(0, conv - paid);
 }
 
 function customerLabelPlain(ctx) {
@@ -354,6 +401,7 @@ function mainMenuKeyboard() {
   rows.push([Markup.button.callback('💳 طريقة الدفع', 'payment')]);
   rows.push([Markup.button.callback('🛒 اشترك الآن (تفعيل كامل)', 'subscribe')]);
   rows.push([Markup.button.callback('🎁 رابط الإحالة (اجلب 10 = مجاني)', 'referral')]);
+  rows.push([Markup.button.callback('🤝 كن شريكاً (أصحاب القنوات)', 'partner')]);
   rows.push([Markup.button.callback('📞 التحدث مع الدعم', 'support')]);
   return Markup.inlineKeyboard(rows);
 }
@@ -473,6 +521,49 @@ function proofReceivedText() {
   return `✅ تم الاستلام بنجاح.\nسيقوم فريقنا بالتحقق وإرسال مفتاح الترخيص خلال وقت قصير.\n\nشكراً لثقتك بـ ${escapeMarkdown(CONFIG.APP_NAME)} 🙏`;
 }
 
+// ==================== نصوص برنامج الشركاء ====================
+function partnerIntroText() {
+  return `🤝 *برنامج شركاء ${escapeMarkdown(CONFIG.APP_NAME)}*\n\n` +
+    `أنت تملك قناة/صفحة بجمهور كبير (تيليجرام، فيسبوك، تيك توك، يوتيوب)؟\n` +
+    `قدّم لجمهورك تطبيقاً مفيداً مقابل عمولة حقيقية. 💰\n\n` +
+    `*كيف يعمل؟*\n` +
+    `1️⃣ املأ بياناتك أدناه (المنصة + الرابط + عدد المتابعين)\n` +
+    `2️⃣ فريقنا يراجع حسابك ويوافق خلال وقت قصير\n` +
+    `3️⃣ تحصل على رابطك الخاص وتنشره لجمهورك\n` +
+    `4️⃣ عن كل *مشترك مدفوع* يصل عبر رابطك → *${CONFIG.PARTNERS.commissionPerSub} دج* عمولة!\n\n` +
+    `📌 لا حدود للأرباح — كلما جلبت أكثر، ربحت أكثر.\n\n` +
+    `✍️ اختر المنصة التي تملك جمهوراً فيها:`;
+}
+function partnerPlatformKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('📢 تيليجرام', 'preg_telegram'), Markup.button.callback('📘 فيسبوك', 'preg_facebook')],
+    [Markup.button.callback('🎵 تيك توك', 'preg_tiktok'), Markup.button.callback('▶️ يوتيوب', 'preg_youtube')],
+    [Markup.button.callback('🌐 أخرى', 'preg_other'), Markup.button.callback('🔙 القائمة الرئيسية', 'main_menu')],
+  ]);
+}
+function partnerStatusTextForUser(partner, botUsername) {
+  ensurePartners();
+  const link = getPartnerLink(partner, botUsername);
+  const earned = countPartnerEarned(partner);
+  const visits = (partner && Array.isArray(partner.visits)) ? partner.visits.length : 0;
+  const text = `🤝 *حسابك كشريك ${escapeMarkdown(CONFIG.APP_NAME)}*\n\n` +
+    `📡 المنصة: ${partnerPlatformLabel(partner.platform)}\n` +
+    `🔗 قناتك/صفحتك: ${escapeMarkdown(partner.channelLink || partner.channelName || '-')}\n` +
+    `👥 المتابعون تقريباً: ${escapeMarkdown(partner.followers || '-')}\n` +
+    `🟢 الحالة: ${partnerStatusText(partner)}\n\n` +
+    `📊 *إحصائيات:*\n` +
+    `👀 زوار عبر رابطك: *${visits}*\n` +
+    `✅ مشتركون عنها: *${earned}*\n` +
+    `💰 المستحق لك: *${earned * CONFIG.PARTNERS.commissionPerSub} دج*\n\n` +
+    `🔗 *رابطك الخاص:*\n\`${link}\`\n\n` +
+    (partner.status === 'pending'
+      ? '⏳ حسابك بانتظار مراجعة الأدمن. ستُفعل فور الموافقة.'
+      : partner.status === 'blocked'
+        ? '⛔ توقف حسابك. تواصل مع الدعم للاستفسار.'
+        : 'انشر رابطك في قناتك/صفحتك — عن كل مشترك يدفع تحصل على عمولتك تلقائياً.');
+  return text;
+}
+
 // ==================== أوامر عامة ====================
 bot.start(async (ctx) => {
   ctx.session.state = 'menu';
@@ -494,6 +585,23 @@ bot.start(async (ctx) => {
       } catch {}
       // إشعار للمُحيل أنه جلب زائر
       await sendToUser(referrerId, `👀 زائر جديد دخل عبر رابطك! عندما يشترك سيُحسب لك +1 نحو جائزة 10 زبائن = مدى الحياة مجاناً.`);
+    }
+  } else if (payload && payload.startsWith('PART_')) {
+    // وصول عبر رابط شريك (قناة/صفحة بجمهور)
+    const found = getPartnerByCode(payload);
+    if (found) {
+      ensurePartners();
+      const p = found.partner;
+      if (p.status === 'active') {
+        if (!Array.isArray(p.visits)) p.visits = [];
+        if (!p.visits.includes(userId)) {
+          p.visits.push(userId);
+          saveStore(store);
+          console.log(`[PARTNER] visitor ${userId} via ${payload} (${p.code})`);
+          // إشعار للشريك بزائر جديد
+          await sendToUser(found.userId, `👀 زائر جديد (${userId}) دخل عبر رابطك! عندما يدفع الاشتراك تُحسب لك عمولتك.`);
+        }
+      }
     }
   }
   saveStore(store);
@@ -630,6 +738,105 @@ bot.command('referrals', async (ctx) => {
     text += `${i+1}. \`${uid}\` — ${r.count}/10 ${r.rewarded ? '✅' : ''} — ${r.code}\n`;
   });
   await ctx.replyWithMarkdown(text);
+});
+
+// ==================== أوامر برنامج الشركاء ====================
+// الشريك: عرض إحصائياته عبر الأمر
+bot.command('pstatus', async (ctx) => {
+  const p = getPartnerByUserId(ctx.from.id);
+  if (!p) return ctx.reply('لست مسجلاً كشريك بعد. اضغط "🤝 كن شريكاً (أصحاب القنوات)" من القائمة للتسجيل.');
+  const botUsername = ctxBotUsername() || 'YousFarmDZ_Store_bot';
+  await ctx.replyWithMarkdown(partnerStatusTextForUser(p, botUsername));
+});
+// تسجيل سريع عبر الأمر
+bot.command('partner', async (ctx) => {
+  const p = getPartnerByUserId(ctx.from.id);
+  if (p) {
+    const botUsername = ctxBotUsername() || 'YousFarmDZ_Store_bot';
+    return ctx.replyWithMarkdown(partnerStatusTextForUser(p, botUsername));
+  }
+  await ctx.replyWithMarkdown(partnerIntroText(), partnerPlatformKeyboard());
+});
+bot.command('approvepartner', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ للأدمن فقط.');
+  const args = ctx.message.text.split(/\s+/);
+  const targetId = args[1] ? String(args[1]).replace(/[^0-9]/g, '') : null;
+  if (!targetId) return ctx.reply('استخدم: /approvepartner <userId>\nمثال: /approvepartner 6190616202');
+  ensurePartners();
+  const p = store.partners[targetId];
+  if (!p) return ctx.reply(`❌ لا يوجد طلب شراكة من ${targetId}.`);
+  p.status = 'active';
+  saveStore(store);
+  console.log(`[PARTNER] approved ${targetId}`);
+  const link = getPartnerLink(p, ctxBotUsername() || 'YousFarmDZ_Store_bot');
+  await ctx.replyWithMarkdown(`✅ *تمت الموافقة على الشريك \`${targetId}\`*\n\n🔗 رابط الشراكة له:\n\`${link}\``);
+  const ok = await sendToUser(targetId,
+    `🎉 *مبروك! تمت الموافقة على حسابك كشريك ${escapeMarkdown(CONFIG.APP_NAME)}!* 🎉\n\n` +
+    `🤝 رابطك الخاص (انشره في قناتك/صفحتك):\n\`${link}\`\n\n` +
+    `💰 عن كل مشترك مدفوع يصل عبر رابطك → *${CONFIG.PARTNERS.commissionPerSub} دج*\n` +
+    `📊 تابع إحصائياتك من زر "🤝 كن شريكاً" في القائمة.`);
+  if (!ok) await ctx.reply(`⚠️ تعذر إبلاغ الشريك ${targetId} (ربما حظر البوت).`);
+});
+bot.command('rejectpartner', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ للأدمن فقط.');
+  const args = ctx.message.text.split(/\s+/);
+  const targetId = args[1] ? String(args[1]).replace(/[^0-9]/g, '') : null;
+  if (!targetId) return ctx.reply('استخدم: /rejectpartner <userId>');
+  ensurePartners();
+  const p = store.partners[targetId];
+  if (!p) return ctx.reply(`❌ لا يوجد طلب شراكة من ${targetId}.`);
+  store.partners[targetId].status = 'blocked';
+  saveStore(store);
+  await ctx.reply(`⛔ تم رفض واتخاذ شريك ${targetId}.`);
+  await sendToUser(targetId, '❌ عذراً، لم يتم قبول طلب الشراكة حالياً. تواصل مع الدعم لمزيد من التفاصيل.');
+});
+bot.command('partners', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ للأدمن فقط.');
+  ensurePartners();
+  const entries = Object.entries(store.partners || {});
+  if (entries.length === 0) return ctx.reply('لا يوجد شركاء بعد.');
+  let text = `🤝 *الشركاء (${entries.length}):*\n\n`;
+  entries.slice(0, 25).forEach(([uid, p]) => {
+    const earned = countPartnerEarned(p);
+    const visits = Array.isArray(p.visits) ? p.visits.length : 0;
+    text += `• \`${uid}\` — ${partnerStatusText(p)}\n` +
+      `  ${partnerPlatformLabel(p.platform)} | 👀 ${visits} | ✅ ${earned} مدفوعاً\n`;
+  });
+  text += `\n*العمولة:* ${CONFIG.PARTNERS.commissionPerSub} دج/مشترك — الدفع عبر /auditpartner`;
+  await ctx.replyWithMarkdown(text);
+});
+bot.command('auditpartner', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ للأدمن فقط.');
+  ensurePartners();
+  const entries = Object.entries(store.partners || {}).filter(([_, p]) => countPartnerEarned(p) > 0);
+  if (entries.length === 0) return ctx.reply('لا توجد مبالغ مستحقة للشركاء حالياً.');
+  let text = `💰 *أرصدة الشركاء (غير المدفوعة):*\n\n`;
+  entries.slice(0, 25).forEach(([uid, p]) => {
+    const earned = countPartnerEarned(p);
+    const amount = earned * CONFIG.PARTNERS.commissionPerSub;
+    text += `• \`${uid}\` — ${earned} مشترك — *${amount} دج*\n` +
+      `  للتسديد كمدفوع: /paypartner ${uid}\n`;
+  });
+  await ctx.replyWithMarkdown(text);
+});
+bot.command('paypartner', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ للأدمن فقط.');
+  const args = ctx.message.text.split(/\s+/);
+  const targetId = args[1] ? String(args[1]).replace(/[^0-9]/g, '') : null;
+  if (!targetId) return ctx.reply('استخدم: /paypartner <userId> — وتُدفع المستحقات وتصفّر الرصيد');
+  ensurePartners();
+  const p = store.partners[targetId];
+  if (!p) return ctx.reply(`❌ لا يوجد شريك ${targetId}.`);
+  const earned = countPartnerEarned(p);
+  if (earned === 0) return ctx.reply('ℹ️ لا توجد مبالغ مستحقة لهذا الشريك.');
+  if (!Array.isArray(p.paidUsers)) p.paidUsers = [];
+  p.paidUsers = (p.convertedUsers || []).slice();
+  saveStore(store);
+  const amount = earned * CONFIG.PARTNERS.commissionPerSub;
+  await ctx.replyWithMarkdown(`✅ تم إثبات الدفع للشريك \`${targetId}\` بقيمة *${amount} دج* (${earned} مشترٍ).`);
+  await sendToUser(targetId,
+    `💰 تم تحويل مستحقاتك من ${escapeMarkdown(CONFIG.APP_NAME)}!\n\n` +
+    `شكراً لتعاونك — انتظر رسالة الأدمن بخصوص طريقة الاستلام.`);
 });
 
 // معرف المستخدم الحالي (يساعد الزبون والأدمن)
@@ -889,6 +1096,110 @@ bot.action('referral', async (ctx) => {
   ]));
 });
 
+// ==================== برنامج الشركاء (أصحاب القنوات/الصفحات) ====================
+bot.action('partner', async (ctx) => {
+  await ctx.answerCbQuery();
+  // إن كان شريكاً بالفعل -> يري وضعه (حتى لو pending/blocked)
+  const current = getPartnerByUserId(ctx.from.id);
+  if (current) {
+    const botUsername = ctxBotUsername() || 'YousFarmDZ_Store_bot';
+    await ctx.replyWithMarkdown(partnerStatusTextForUser(current, botUsername), Markup.inlineKeyboard([
+      [Markup.button.url('📤 مشاركة رابطك', `https://t.me/share/url?url=${encodeURIComponent(getPartnerLink(current, botUsername))}&text=${encodeURIComponent('جرّب YousFarm DZ - إدارة مبيعات الدواجن 🐔')}`)],
+      [Markup.button.callback('🔙 القائمة الرئيسية', 'main_menu')],
+    ]));
+    return;
+  }
+  // تسجيل جديد
+  ctx.session.state = 'menu';
+  await ctx.replyWithMarkdown(partnerIntroText(), partnerPlatformKeyboard());
+});
+
+// اختيار المنصة في التسجيل
+bot.action(/^preg_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const platform = ctx.match[1];
+  ctx.session.pendingPartner = { platform };
+  ctx.session.state = 'awaiting_partner_info';
+  const examples = { telegram: '@قناتك', facebook: 'facebook.com/صفحتك', tiktok: '@حسابك', youtube: 'youtube.com/@قناتك', other: 'رابط صفحتك' };
+  await ctx.replyWithMarkdown(
+    `📡 المنصة المختارة: *${partnerPlatformLabel(platform)}*\n\n` +
+    `👥 أرسل الآن *رابط قناتك/صفحتك* + *عدد المتابعين* (في نفس الرسالة):\n\n` +
+    `مثال:\n\`${examples[platform]} — 5000 متابع\`\n\n` +
+    `أو اكتب /cancel لإلغاء.`,
+    cancelKeyboard()
+  );
+});
+
+bot.on('text', async (ctx, next) => {
+  if (ctx.session.state !== 'awaiting_partner_info') return next();
+  const pending = ctx.session.pendingPartner || { platform: 'other' };
+  const raw = ctx.message.text.trim();
+  if (raw.length < 3 || raw.length > 300) {
+    await ctx.reply('⚠️ الرجاء إرسال الرابط وعدد المتابعين بشكل مختصر (مثال: @قناتي — 5000).');
+    return;
+  }
+  // فصل الرابط عن عدد المتابعين
+  const m = raw.match(/^(.*?)\s*[-–—:؛]\s*(.+)$/);
+  let channelLink = raw;
+  let followers = '';
+  if (m) {
+    channelLink = m[1].trim();
+    followers = m[2].trim();
+  } else {
+    // محاولة: آخر رقم في النص كعدد المتابعين
+    const num = raw.match(/(\d[\d\s.,]*)\s*(متابع|مشترك|فولو|subscriber|following)?\s*$/i);
+    if (num) {
+      followers = num[1] + (num[2] ? ' ' + num[2] : '');
+      channelLink = raw.slice(0, num.index).trim();
+    }
+  }
+  if (channelLink.length < 2) channelLink = raw;
+  const userId = String(ctx.from.id);
+  ensurePartners();
+  const existing = getPartnerByUserId(userId);
+  if (existing) {
+    ctx.session.state = 'menu';
+    const botUsername = ctxBotUsername() || 'YousFarmDZ_Store_bot';
+    await ctx.replyWithMarkdown('⚠️ لديك حساب شريك بالفعل.', Markup.inlineKeyboard([[Markup.button.callback('🔙 القائمة الرئيسية', 'main_menu')]]));
+    return;
+  }
+  const partner = {
+    code: makePartnerCode(),
+    platform: pending.platform || 'other',
+    channelLink,
+    channelName: channelLink,
+    followers,
+    status: 'pending',
+    visits: [],
+    convertedUsers: [],
+    paidUsers: [],
+    requestedAt: new Date().toISOString(),
+  };
+  store.partners[userId] = partner;
+  saveStore(store);
+  ctx.session.state = 'menu';
+  ctx.session.pendingPartner = null;
+  console.log(`[PARTNER] application from ${userId} (${partner.platform}) → ${partner.code}`);
+  await ctx.replyWithMarkdown(
+    `✅ *تم استلام طلبك كشريك ${escapeMarkdown(CONFIG.APP_NAME)}!*\n\n` +
+    `📡 المنصة: ${partnerPlatformLabel(partner.platform)}\n` +
+    `🔗 الرابط: ${escapeMarkdown(partner.channelLink)}\n` +
+    `👥 المتابعون: ${escapeMarkdown(partner.followers || 'غير محدد')}\n\n` +
+    `⏳ فريقنا سيراجع حسابك ويوافق عليه قريباً. ستصلك رسالة فور التفعيل.`,
+    backKeyboard()
+  );
+  // إشعار الأدمن مع تنبيه للتحقق اليدوي من القناة/الصفحة
+  await notifyAdmin(
+    `🤝 *طلب شراكة جديد* — تحقق يدوياً من القناة/الصفحة قبل الموافقة\n\n` +
+    `👤 المتقدم: [${userId}](tg://user?id=${userId})\n` +
+    `📡 المنصة: ${partnerPlatformLabel(partner.platform)}\n` +
+    `🔗 القناة/الصفحة: ${escapeMarkdown(partner.channelLink)}\n` +
+    `👥 المتابعون: ${escapeMarkdown(partner.followers || 'غير محدد')}\n` +
+    `🆔 معرفه: \`${userId}\`\n\n` +
+    `للموافقة: /approvepartner ${userId}\nللرفض: /rejectpartner ${userId}`
+  );
+});
+
 // ==================== استقبال معرّف الجهاز ====================
 const DEVICE_ID_REGEX = /^YF-[A-Z0-9]{4,}-[A-Z0-9-]{4,}$/i; // يتماشى مع صيغة YF-XXXX-...
 
@@ -1119,6 +1430,32 @@ bot.action(/^approve_(\d+)_(YF-[A-Z0-9-]+)_([A-Za-z])$/, async (ctx) => {
       }
     }
   } catch (e) { console.error('referral increment error', e.message); }
+  // نظام الشركاء: احسب عمولة الشريك إن دخل الزبون عبر رابط شريك
+  let partnerNote = '';
+  try {
+    if (store.partners && Object.keys(store.partners).length > 0) {
+      // نبحث: هل الزبون دخل عبر رابط شريك؟ عبر visits
+      for (const [pid, p] of Object.entries(store.partners)) {
+        if (p.status !== 'active') continue;
+        if (Array.isArray(p.visits) && p.visits.includes(userId)) {
+          if (!Array.isArray(p.convertedUsers)) p.convertedUsers = [];
+          if (!p.convertedUsers.includes(userId)) {
+            p.convertedUsers.push(userId);
+            saveStore(store);
+            const earnedNow = countPartnerEarned(p);
+            partnerNote = `\n🤝 أُضيفت عمولة للشريك ${pid}! (الرصيد: ${earnedNow} مشترك)`;
+            console.log(`[PARTNER] conversion from ${userId} → partner ${pid} (${p.code})`);
+            await sendToUser(pid,
+              `💰 *عمولة جديدة في ${escapeMarkdown(CONFIG.APP_NAME)}!*\n\n` +
+              `مشترك جديد وصل عبر رابطك وأكمل اشتراكه (الزبون: ${userId}).\n` +
+              `📊 رصيدك الآن: *${earnedNow} مشترك* = ${earnedNow * CONFIG.PARTNERS.commissionPerSub} دج.\n` +
+              `💳 لاستلام مستحقاتك، أخبر الأدمن.`);
+          }
+          break;
+        }
+      }
+    }
+  } catch (e) { console.error('partner conversion error', e.message); }
   // توليد المفتاح تلقائياً بنفس خوارزمية التطبيق (Y=سنة، F=مدى الحياة)
   let generatedKey = null;
   try {
@@ -1129,7 +1466,7 @@ bot.action(/^approve_(\d+)_(YF-[A-Z0-9-]+)_([A-Za-z])$/, async (ctx) => {
   }
   const typeName = typeCode === 'Y' ? 'سنة' : typeCode === 'F' ? 'مدى الحياة' : typeCode;
   const keyLine = generatedKey ? `\n🔑 المفتاح (${typeName}): \`${generatedKey}\`` : `\n⚠️ فشل التوليد التلقائي — أرسل المفتاح يدوياً: \`/send ${userId} المفتاح\``;
-  await ctx.editMessageCaption(`✅ تمت الموافقة (${typeName}) — المستخدم ${userId}.${discountNote}${referralNote}${keyLine}`, { parse_mode: 'Markdown' });
+  await ctx.editMessageCaption(`✅ تمت الموافقة (${typeName}) — المستخدم ${userId}.${discountNote}${referralNote}${partnerNote}${keyLine}`, { parse_mode: 'Markdown' });
   let userMsg;
   if (generatedKey) {
     userMsg = `✅ تم تأكيد الدفع! 🎉\n\n🔑 *مفتاحك الخاص (${typeName}):*\n\`${generatedKey}\`\n\nانسخه والصقه في التطبيق ← شاشة التفعيل ← *تفعيل*.`;
